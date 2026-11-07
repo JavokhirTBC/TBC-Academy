@@ -57,13 +57,13 @@ function toast(m) { const t = document.createElement('div'); t.className = 'toas
 async function api(p, o = {}) {
   const C = window.CFG || {};
   const h = { 'Content-Type': 'application/json' };
-  if (C.key) { h.apikey = C.key; h.Authorization = 'Bearer ' + C.key; }
+  if (C.useKey && C.key) { h.apikey = C.key; h.Authorization = 'Bearer ' + C.key; }
   if (S.tok) h['X-Token'] = S.tok;
   let r;
   try { r = await fetch((C.api || '/api') + p, { method: o.method || 'GET', headers: h, body: o.body ? JSON.stringify(o.body) : undefined }); }
   catch (e) { throw Object.assign(new Error('Нет связи с сервером. Проверьте интернет и повторите.'), { status: 0 }); }
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) { if (r.status === 401 && S.tok && p !== '/login') { dropSession(); render(); } throw Object.assign(new Error(j.error || j.message || 'Ошибка'), { status: r.status }); }
+  if (!r.ok) { if (r.status === 401 && S.tok && p !== '/login') { dropSession(); render(); } throw Object.assign(new Error(j.error || j.message || j.msg || j.error_description || ('Сервер вернул ошибку ' + r.status)), { status: r.status }); }
   return j;
 }
 function dropSession() { S.tok = ''; S.me = null; S.st = null; localStorage.removeItem('tok'); }
