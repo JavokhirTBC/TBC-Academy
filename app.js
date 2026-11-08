@@ -70,27 +70,20 @@ function dropSession() { S.tok = ''; S.me = null; S.st = null; localStorage.remo
 const isC = () => S.me && S.me.role === 'candidate';
 async function refresh() { S.st = await api('/state'); }
 async function boot() {
-  if (S.tok) { try { S.me = (await api('/me')).user; if (isC()) await refresh(); else await loadAd(); } catch (e) { dropSession(); } }
+  if (S.tok) { try { S.me = (await api('/me')).user; if (isC()) await refresh(); else { S.scr = 'a_stats'; await adLoad('a_stats'); } } catch (e) { dropSession(); } }
   render();
 }
 async function go(scr, p = {}) {
+  if (S.me && !isC()) return adGo(scr, p);
   clearInterval(S.tm); S.m = '';
   try {
     if (scr === 'lesson') { S.lesson = await api('/lessons/' + p.id); await refresh(); }
     else if (scr === 'hist') { S.hist = await api('/blocks/' + p.id + '/attempts'); }
     else if (scr === 'test') { S.att = await api('/blocks/' + p.id + '/attempts', { method: 'POST' }); }
     else if (isC() && ['main', 'lessons', 'tests', 'progress', 'rating', 'profile', 'block'].includes(scr)) await refresh();
-    else if (!isC() && S.me) await loadAd(scr);
   } catch (e) { toast(e.message); if (isC()) { try { await refresh(); } catch (x) { } scr = scr === 'test' ? 'block' : scr === 'lesson' ? 'lessons' : S.scr; p = scr === 'block' ? { id: p.id } : {}; } else return; }
   S.scr = scr; S.p = p; render(); scrollTo(0, 0);
   if (scr === 'test') startTimer();
-}
-async function loadAd(scr) {
-  const s = scr || S.scr;
-  if (!S.ad.meta) S.ad.meta = await api('/meta');
-  if (s === 'a_cands' || !['a_cohorts', 'a_courses'].includes(s)) S.ad.cands = await api('/candidates');
-  if (s === 'a_cohorts') S.ad.cohorts = await api('/cohorts');
-  if (s === 'a_courses') S.ad.courses = await api('/courses');
 }
 function logout() { api('/logout', { method: 'POST' }).catch(() => { }); dropSession(); S.scr = 'main'; render(); }
 function setLang(l) { S.lang = l; localStorage.setItem('lang', l); render(); }
@@ -203,7 +196,7 @@ V.profile = () => `<div class="hero prof ip"><div class="ph"><h1>${fmt(S.me.logi
 const loginV = () => `<div class="wrap login"><div class="card"><h1>Вход в обучение</h1><p class="mu">Введите номер телефона, указанный при регистрации, и код доступа: последние 4 цифры этого номера.</p><label class="f" for="lg">Номер телефона</label><input id="lg" type="text" autocomplete="username" placeholder="+998 90 123 45 67"><label class="f" for="pw">Код доступа (последние 4 цифры номера)</label><input id="pw" type="password" autocomplete="current-password" maxlength="64"><div class="err" id="er"></div><button id="go" style="width:100%">Войти</button><p class="mu" style="margin-top:14px">Сотрудники вводят рабочую почту и пароль в те же поля.</p></div><div class="lng" style="justify-content:center"><button class="lg ${S.lang !== 'uz' ? 'on' : ''}" onclick="setLang('ru')">RU</button><button class="lg ${S.lang === 'uz' ? 'on' : ''}" onclick="setLang('uz')">UZ</button></div></div>`;
 function bindLogin() {
   const go2 = async () => {
-    try { const r = await api('/login', { method: 'POST', body: { login: $('#lg').value, password: $('#pw').value } }); S.tok = r.token; localStorage.setItem('tok', r.token); S.me = r.user; S.scr = isC() ? 'main' : 'a_cands'; if (isC()) await refresh(); else await loadAd(); render(); }
+    try { const r = await api('/login', { method: 'POST', body: { login: $('#lg').value, password: $('#pw').value } }); S.tok = r.token; localStorage.setItem('tok', r.token); S.me = r.user; S.scr = isC() ? 'main' : 'a_stats'; if (isC()) await refresh(); else await adLoad('a_stats'); render(); }
     catch (e) { $('#er').textContent = trs(e.message); }
   };
   $('#go').onclick = go2; $('#pw').onkeydown = $('#lg').onkeydown = e => { if (e.key === 'Enter') go2(); };
@@ -213,37 +206,243 @@ async function chooseLang(l) { try { S.st = await api('/choose', { method: 'POST
 
 // ---------- панель сотрудников ----------
 const ROLE = { admin: 'Администратор', recruiter: 'Рекрутер', trainer: 'Тренер' };
-function adminV() {
-  const n = [['a_cands', 'Кандидаты'], ['a_cohorts', 'Потоки'], ['a_courses', 'Курсы']];
-  return `<div class="top"><div class="brand">Админ-панель<small>${ROLE[S.me.role]} · ${esc(S.me.login)}</small></div><button class="lnk" onclick="logout()">Выйти</button></div><div class="wrap lay"><aside><nav>${n.map(([k, t]) => `<button class="${S.scr === k ? 'on' : ''}" onclick="go('${k}')"><span>${t}</span></button>`).join('')}</nav></aside><main>${({ a_cands: aCands, a_cohorts: aCohorts, a_courses: aCourses }[S.scr] || aCands)()}</main></div>${S.m ? `<div class="mod" onclick="if(event.target===this){S.m='';render()}"><div class="mbox">${S.m}</div></div>` : ''}`;
-}
-const can = r => ['admin', 'recruiter'].includes(S.me.role) && (r !== 'admin' || S.me.role === 'admin');
-const fld = (id, l, v, t) => `<label class="f" for="${id}">${l}</label><input id="${id}" type="${t || 'text'}" value="${esc(v || '')}">`;
+const AD = { d: {}, f: { q: '', st: '', co: '' }, sc: { course: 0, cohort: 0 }, meta: null, cands: [], cohorts: [], courses: [], course: null, dirs: [], staff: [], set: {}, audit: [], stats: null };
+const can = r => (r || ['admin', 'recruiter']).includes(S.me.role);
+const fld = (id, l, v, t, ph) => `<label class="f" for="${id}">${l}</label><input id="${id}" type="${t || 'text'}" value="${esc(v == null ? '' : v)}" ${ph ? `placeholder="${esc(ph)}"` : ''}>`;
+const ta = (id, l, v, h) => `<label class="f" for="${id}">${l}</label><textarea id="${id}" style="min-height:${h || 110}px">${esc(v == null ? '' : v)}</textarea>`;
 const sel = (id, l, o, v) => `<label class="f" for="${id}">${l}</label><select id="${id}">${o.map(([k, t]) => `<option value="${esc(k)}" ${String(k) === String(v) ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>`;
-const val = id => $('#' + id).value.trim();
+const val = id => { const e = $('#' + id); return e ? e.value.trim() : ''; };
+const chk = id => { const e = $('#' + id); return e && e.checked ? 1 : 0; };
+const mclose = () => { S.m = ''; S.mw = 0; render(); };
+const mbtn = (ok, t, extra) => `<div class="acts" style="margin-top:14px"><button onclick="${ok}">${t}</button><button class="sec" onclick="mclose()">Отмена</button>${extra || ''}</div>`;
+const mopen = (h, w) => { S.m = h; S.mw = w ? 1 : 0; render(); };
+const perr = t => { const e = $('#pe'); if (e) e.textContent = t; };
+const dform = iso => (iso || '').slice(0, 10);
+async function copyText(t) { try { await navigator.clipboard.writeText(t); return true; } catch (e) { const a = document.createElement('textarea'); a.value = t; document.body.appendChild(a); a.select(); let ok = false; try { ok = document.execCommand('copy'); } catch (x) { } a.remove(); return ok; } }
 const SB = { invited: ['', 'Приглашён'], in_progress: ['', 'Обучение идёт'], completed: ['ok', 'Прошёл'], failed: ['no', 'Не прошёл'], expired: ['no', 'Срок истёк'] };
+const NAV = [['a_stats', 'Аналитика'], ['a_cands', 'Кандидаты'], ['a_cohorts', 'Потоки'], ['a_courses', 'Курсы', ['admin', 'trainer']], ['a_dirs', 'Направления', ['admin']], ['a_staff', 'Сотрудники', ['admin']], ['a_set', 'Настройки', ['admin']], ['a_audit', 'Журнал', ['admin']]];
+async function adGo(scr, p = {}) { S.m = ''; S.scr = scr; S.p = p; S.loading = true; render(); try { await adLoad(scr, p); } catch (e) { toast(e.message); } S.loading = false; render(); scrollTo(0, 0); }
+async function adLoad(scr, p = {}) {
+  const jobs = [];
+  if (!AD.meta) jobs.push(api('/meta').then(m => { AD.meta = m; }));
+  if (scr === 'a_stats') jobs.push(api('/analytics?course=' + (AD.sc.course || 0) + '&cohort=' + (AD.sc.cohort || 0)).then(x => { AD.stats = x; }));
+  else if (scr === 'a_cands') jobs.push(api('/candidates').then(x => { AD.cands = x; }));
+  else if (scr === 'a_cohorts') jobs.push(api('/cohorts').then(x => { AD.cohorts = x; }));
+  else if (scr === 'a_courses') jobs.push(api('/courses').then(x => { AD.courses = x; }));
+  else if (scr === 'a_course') jobs.push(api('/courses/' + p.id).then(x => { AD.course = x; }));
+  else if (scr === 'a_dirs') jobs.push(api('/directions').then(x => { AD.dirs = x; }));
+  else if (scr === 'a_staff') jobs.push(api('/staff').then(x => { AD.staff = x; }));
+  else if (scr === 'a_set') jobs.push(api('/settings').then(x => { AD.set = x; }));
+  else if (scr === 'a_audit') jobs.push(api('/audit').then(x => { AD.audit = x; }));
+  await Promise.all(jobs);
+}
+const adRefresh = async () => { AD.meta = null; await adGo(S.scr, S.p); };
+function adminV() {
+  const nav = NAV.filter(n => !n[2] || n[2].includes(S.me.role));
+  return `<div class="top"><div class="brand">Админ-панель<small>${ROLE[S.me.role]} · ${esc(S.me.login)}</small></div><button class="lnk" onclick="logout()">Выйти</button></div><div class="wrap lay"><aside><nav>${nav.map(([k, t]) => `<button class="${S.scr === k || (k === 'a_courses' && S.scr === 'a_course') ? 'on' : ''}" onclick="adGo('${k}')"><span>${t}</span></button>`).join('')}</nav></aside><main>${S.loading ? '<p class="mu">Загрузка…</p>' : ''}${({ a_stats: aStats, a_cands: aCands, a_cohorts: aCohorts, a_courses: aCourses, a_course: aCourse, a_dirs: aDirs, a_staff: aStaff, a_set: aSet, a_audit: aAudit }[S.scr] || aStats)()}</main></div>${S.m ? `<div class="mod" onclick="if(event.target===this)mclose()"><div class="mbox ${S.mw ? 'wide' : ''}">${S.m}</div></div>` : ''}`;
+}
+// ===== Аналитика =====
+function aStats() {
+  const s = AD.stats; if (!s) return '<div class="card"><p class="mu">Нет данных</p></div>';
+  const k = s.kpi, tiles = [['Всего кандидатов', k.total], ['Приглашены', k.invited], ['Учатся', k.in_progress], ['Прошли', k.completed], ['Не прошли', k.failed], ['Срок истёк', k.expired], ['Заходили за 7 дней', k.active7d]];
+  const mx = Math.max(1, ...s.activity.map(a => a.n));
+  return `<div class="card"><h1>Аналитика</h1><div class="acts" style="gap:14px">${sel('as_c', 'Курс', s.courses.map(c => [c.id, c.title + ' (' + c.lang.toUpperCase() + ')']), s.course_id)}${sel('as_h', 'Поток', [[0, 'Все потоки']].concat(AD.meta.cohorts.map(c => [c.id, c.title])), s.cohort_id)}</div><p><button class="sec sm" onclick="AD.sc.course=+val('as_c');AD.sc.cohort=+val('as_h');adGo('a_stats')">Показать</button></p></div>
+<div class="grid">${tiles.map(([t, v]) => `<div><b style="font-size:26px">${v}</b>${t}</div>`).join('')}</div>
+<div class="card" style="margin-top:16px"><h2>Воронка по модулям</h2><div class="tw"><table><tr><th>Модуль</th><th>Дошли до теста</th><th>Сдали</th><th>Средний лучший результат</th></tr>${s.funnel.map(f => `<tr><td><b>${esc(f.title)}</b></td><td>${f.attempted}</td><td>${f.passed}${f.attempted ? ' (' + Math.round(f.passed / f.attempted * 100) + '%)' : ''}</td><td style="min-width:160px">${f.avg == null ? '—' : f.avg + '%'}<div class="bar"><i style="width:${f.avg || 0}%"></i></div></td></tr>`).join('')}</table></div></div>
+<div class="card"><h2>Самые сложные вопросы</h2>${s.hard.length ? s.hard.map(h => `<div class="ans"><div>${esc(h.text)}</div><div class="bar"><i style="width:${h.rate}%"></i></div><span class="mu">${h.rate}% ответили верно · ответов: ${h.asked}</span></div>`).join('') : '<p class="mu">Пока недостаточно ответов (нужно хотя бы 3 на вопрос).</p>'}</div>
+<div class="card"><h2>Потоки</h2><div class="tw"><table><tr><th>Поток</th><th>Кандидатов</th><th>Прошли</th><th>Не прошли</th><th>Средний результат</th></tr>${s.cohorts.map(c => `<tr><td><b>${esc(c.title)}</b></td><td>${c.total}</td><td>${c.completed}</td><td>${c.failed}</td><td>${c.avg == null ? '—' : c.avg + '%'}</td></tr>`).join('') || '<tr><td colspan="5" class="mu">Потоков нет</td></tr>'}</table></div></div>
+<div class="card"><h2>Активность (дни входов за 2 недели)</h2><div style="display:flex;gap:6px;align-items:flex-end;height:110px">${s.activity.map(a => `<div style="flex:1;text-align:center"><div style="background:#16d1a8;border-radius:6px 6px 0 0;height:${Math.max(4, a.n / mx * 90)}px"></div><div class="mu" style="font-size:11px">${a.day.slice(5)}<br><b>${a.n}</b></div></div>`).join('') || '<span class="mu">Входов пока не было</span>'}</div></div>`;
+}
+// ===== Кандидаты =====
+function candRows() {
+  const f = AD.f, q = f.q.toLowerCase();
+  return AD.cands.filter(r => (!q || (r.full_name || '').toLowerCase().includes(q) || r.phone.replace(/\D/g, '').includes(q.replace(/\D/g, '') || '@@')) && (!f.st || (f.st === 'off' ? !r.active : r.active && r.status === f.st)) && (!f.co || (f.co === 'none' ? !r.cohort_id : String(r.cohort_id) === f.co)));
+}
+function candTable() {
+  const rows = candRows();
+  return `<p class="mu">Показано: ${rows.length} из ${AD.cands.length}</p><div class="tw"><table><tr><th>Кандидат</th><th>Поток</th><th>Статус</th><th>Прогресс</th><th>Доступ до</th><th>Последний вход</th><th></th></tr>${rows.map(r => `<tr><td><b>${esc(r.full_name || '—')}</b><br><span class="mu">${fmt(r.phone)}</span></td><td>${esc(r.cohort || '—')}</td><td><span class="tag ${r.active ? SB[r.status][0] : 'no'}">${r.active ? SB[r.status][1] : 'Отключён'}</span></td><td>${r.passed} из ${r.total || '—'}${r.percent !== null ? '<br><span class="mu">' + r.percent + '% верных</span>' : ''}</td><td>${dateRu(r.access_until)}</td><td>${r.last_login_at ? new Date(r.last_login_at).toLocaleString('ru-RU') : '—'}</td><td><button class="sec sm" onclick="candCard(${r.id})">Карточка</button></td></tr>`).join('') || '<tr><td colspan="7" class="mu">Никого не найдено</td></tr>'}</table></div>`;
+}
 function aCands() {
-  const c = S.ad.cands || [];
-  return `<div class="card"><h1>Кандидаты</h1><p class="mu">Всего: ${c.length}. Логин кандидата — номер телефона, код доступа — последние 4 цифры номера.</p>${can() ? '<button onclick="candForm()">+ Добавить кандидата</button>' : ''}<div class="tw" style="margin-top:14px"><table><tr><th>Кандидат</th><th>Поток</th><th>Статус</th><th>Прогресс</th><th>Доступ до</th><th>Последний вход</th><th>Действия</th></tr>${c.map(r => `<tr><td><b>${esc(r.full_name || '—')}</b><br><span class="mu">${fmt(r.phone)}</span></td><td>${esc(r.cohort || '—')}</td><td><span class="tag ${r.active ? SB[r.status][0] : 'no'}">${r.active ? SB[r.status][1] : 'Отключён'}</span></td><td>${r.passed} из ${r.total || '—'}${r.percent !== null ? '<br><span class="mu">' + r.percent + '% верных</span>' : ''}</td><td>${dateRu(r.access_until)}</td><td>${r.last_login_at ? new Date(r.last_login_at).toLocaleString('ru-RU') : '—'}</td><td><div class="acts">${can() ? `<button class="sec sm" onclick="cAct(${r.id},'extend')">Продлить</button><button class="sec sm" onclick="cAct(${r.id},'end-session')">Завершить сеанс</button><button class="sec sm" onclick="cAct(${r.id},'reset-password')">Сброс кода</button><button class="sec sm" onclick="cAct(${r.id},'active',${r.active ? 0 : 1})">${r.active ? 'Отключить' : 'Включить'}</button>` : ''}${['admin', 'trainer'].includes(S.me.role) ? `<button class="sec sm" onclick="cAct(${r.id},'reset-attempts')">Сброс попыток</button>` : ''}${S.me.role === 'admin' ? `<button class="sec sm" onclick="cDel(${r.id})">Удалить</button>` : ''}</div></td></tr>`).join('')}</table></div></div>`;
+  const f = AD.f;
+  return `<div class="card"><h1>Кандидаты</h1><p class="mu">Логин кандидата — номер телефона, код доступа — последние 4 цифры номера.</p><div class="acts">${can() ? '<button onclick="candForm()">+ Добавить</button><button class="sec" onclick="candImport()">Импорт списком</button>' : ''}<button class="sec" onclick="copyTable()">Копировать таблицу</button></div>
+<div class="acts" style="margin-top:12px;gap:12px"><input id="fq" type="text" placeholder="Поиск по имени или номеру" value="${esc(f.q)}" style="max-width:280px" oninput="AD.f.q=this.value;$('#ct').innerHTML=candTable()">
+<select id="fs" style="width:auto" onchange="AD.f.st=this.value;$('#ct').innerHTML=candTable()">${[['', 'Все статусы'], ['invited', 'Приглашены'], ['in_progress', 'Учатся'], ['completed', 'Прошли'], ['failed', 'Не прошли'], ['expired', 'Срок истёк'], ['off', 'Отключены']].map(([k, t]) => `<option value="${k}" ${f.st === k ? 'selected' : ''}>${t}</option>`).join('')}</select>
+<select id="fc" style="width:auto" onchange="AD.f.co=this.value;$('#ct').innerHTML=candTable()">${[['', 'Все потоки'], ['none', 'Без потока']].concat(AD.meta.cohorts.map(c => [String(c.id), c.title])).map(([k, t]) => `<option value="${k}" ${f.co === k ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div><div id="ct" style="margin-top:8px">${candTable()}</div></div>`;
 }
-function candForm() { const m = S.ad.meta; S.m = `<h2>Новый кандидат</h2>${fld('cn', 'ФИО', '')}${fld('cp', 'Телефон (логин)', '', 'tel')}${sel('cd', 'Направление', m.directions.map(d => [d.id, d.name]), m.directions[0] && m.directions[0].id)}${sel('cc', 'Поток', [['', 'Без потока']].concat(m.cohorts.map(c => [c.id, c.title])), '')}${sel('cl', 'Язык обучения', [['', 'Кандидат выберет сам'], ['ru', 'Русский'], ['uz', 'Узбекский']], '')}${fld('cy', 'Срок доступа, дней (если без потока)', 14, 'number')}<div class="err" id="pe"></div><div class="acts" style="margin-top:14px"><button onclick="candSave()">Добавить</button><button class="sec" onclick="S.m='';render()">Отмена</button></div>`; render(); }
+async function copyTable() {
+  const t = ['ФИО\tТелефон\tПоток\tСтатус\tМодулей пройдено\tСредний результат %\tДоступ до'].concat(candRows().map(r => [r.full_name, fmt(r.phone), r.cohort || '', r.active ? SB[r.status][1] : 'Отключён', r.passed + '/' + r.total, r.percent == null ? '' : r.percent, dateRu(r.access_until)].join('\t'))).join('\n');
+  toast(await copyText(t) ? 'Таблица скопирована, вставьте в Excel' : 'Не удалось скопировать');
+}
+const invText = (lang, name, login, until) => (AD.meta.invite[lang] || '').replace('{name}', name || '').replace('{link}', location.origin + location.pathname).replace('{phone}', fmt(login)).replace('{code}', String(login).slice(-4)).replace('{deadline}', dateRu(until));
+function invModal(name, login, until, title) {
+  S.inv = { name, login, until, lang: 'ru' };
+  mopen(`<h2>${title || 'Приглашение'}</h2>${sel('iv_l', 'Язык', [['ru', 'Русский'], ['uz', 'Узбекский']], 'ru')}<label class="f" for="inv">Текст</label><textarea id="inv" readonly style="min-height:170px">${esc(invText('ru', name, login, until))}</textarea><div class="acts" style="margin-top:12px"><button onclick="copyInv()">Копировать текст</button><button class="sec" onclick="mclose()">Закрыть</button></div>`);
+  $('#iv_l').onchange = e => { $('#inv').value = invText(e.target.value, name, login, until); };
+}
+async function copyInv() { toast(await copyText($('#inv').value) ? 'Текст скопирован' : 'Выделите текст и скопируйте вручную'); }
+function candForm() {
+  const m = AD.meta;
+  mopen(`<h2>Новый кандидат</h2>${fld('cn', 'ФИО', '')}${fld('cp', 'Телефон (логин)', '', 'tel', '+998 90 123 45 67')}${sel('cd', 'Направление', m.directions.map(d => [d.id, d.name]), m.directions[0] && m.directions[0].id)}${sel('cc', 'Поток', [['', 'Без потока']].concat(m.cohorts.map(c => [c.id, c.title])), '')}${sel('cl', 'Язык обучения', [['', 'Кандидат выберет сам'], ['ru', 'Русский'], ['uz', 'Узбекский']], '')}${fld('cy', 'Срок доступа, дней (если без потока)', 14, 'number')}<div class="err" id="pe"></div>${mbtn('candSave()', 'Добавить')}`);
+}
 async function candSave() {
-  try { const r = await api('/candidates', { method: 'POST', body: { full_name: val('cn'), phone: val('cp'), direction_id: val('cd'), cohort_id: val('cc') || null, lang: val('cl'), days: +val('cy') } });
-    await loadAd('a_cands'); const link = location.origin + location.pathname;
-    S.m = `<h2>Кандидат добавлен</h2><p>Отправьте ему приглашение:</p><textarea id="inv" readonly style="min-height:170px">Здравствуйте! Для вас открыт доступ к онлайн-обучению перед очной частью.\nСсылка: ${link}\nВход: номер телефона ${fmt(r.login)}, код доступа — последние 4 цифры номера (${r.password}).\nДоступ открыт до ${dateRu(r.access_until)}.</textarea><div class="acts" style="margin-top:12px"><button onclick="copyInv()">Копировать текст</button><button class="sec" onclick="S.m='';render()">Закрыть</button></div>`; render();
-  } catch (e) { $('#pe').textContent = e.message; }
+  try {
+    const r = await api('/candidates', { method: 'POST', body: { full_name: val('cn'), phone: val('cp'), direction_id: val('cd'), cohort_id: val('cc') || null, lang: val('cl'), days: +val('cy') } });
+    AD.cands = await api('/candidates'); invModal(val('cn') || 'коллега', r.login, r.access_until, 'Кандидат добавлен');
+  } catch (e) { perr(e.message); }
 }
-function copyInv() { const t = $('#inv'); t.select(); try { document.execCommand('copy'); toast('Текст скопирован'); } catch (e) { toast('Выделите текст и скопируйте вручную'); } }
-async function cAct(id, a, v) { try { const r = await api('/candidates/' + id + '/' + a, { method: 'POST', body: a === 'active' ? { active: !!v } : a === 'extend' ? { days: 3 } : {} }); await loadAd('a_cands'); render(); toast(a === 'reset-password' ? 'Код сброшен: ' + r.password : 'Готово'); } catch (e) { toast(e.message); } }
-function cDel(id) { S.m = `<h2>Удалить кандидата?</h2><p>Данные и результаты будут стёрты безвозвратно. Если нужно закрыть доступ, лучше «Отключить».</p><div class="acts"><button onclick="cDelOk(${id})">Удалить навсегда</button><button class="sec" onclick="S.m='';render()">Отмена</button></div>`; render(); }
-async function cDelOk(id) { try { await api('/candidates/' + id, { method: 'DELETE' }); S.m = ''; await loadAd('a_cands'); render(); } catch (e) { toast(e.message); } }
+function candImport() {
+  const m = AD.meta;
+  mopen(`<h2>Импорт списком</h2><p class="mu">Каждая строка: ФИО и телефон (через точку с запятой, запятую, табуляцию или пробел). Можно вставить столбцы из Excel. До 300 строк.</p>${ta('im_t', 'Список', '', 160)}${sel('cd', 'Направление', m.directions.map(d => [d.id, d.name]), m.directions[0] && m.directions[0].id)}${sel('cc', 'Поток', [['', 'Без потока']].concat(m.cohorts.map(c => [c.id, c.title])), '')}${sel('cl', 'Язык обучения', [['', 'Кандидат выберет сам'], ['ru', 'Русский'], ['uz', 'Узбекский']], '')}${fld('cy', 'Срок доступа, дней (если без потока)', 14, 'number')}<div class="err" id="pe"></div>${mbtn('candImportGo()', 'Импортировать')}`, 1);
+}
+async function candImportGo() {
+  const rows = [];
+  for (const line of val('im_t').split('\n').map(x => x.trim()).filter(Boolean)) {
+    const m = line.match(/^(.*?)[;\t,|]\s*([+\d][\d\s()+\-]{7,})$/) || line.match(/^(.*?)\s+([+\d][\d\s()+\-]{8,})$/) || line.match(/^()([+\d][\d\s()+\-]{8,})$/);
+    rows.push(m ? { full_name: m[1].trim(), phone: m[2].trim() } : { full_name: line, phone: '' });
+  }
+  if (!rows.length) return perr('Вставьте список');
+  try {
+    const r = await api('/candidates/import', { method: 'POST', body: { rows, direction_id: val('cd'), cohort_id: val('cc') || null, lang: val('cl'), days: +val('cy') } });
+    AD.cands = await api('/candidates'); S.imp = r;
+    mopen(`<h2>Импорт завершён</h2><p>Добавлено: <b>${r.created.length}</b>. Ошибок: <b>${r.errors.length}</b>.</p>${r.errors.length ? `<div class="res no">${r.errors.map(e => `Строка ${e.row} (${esc(e.phone || '—')}): ${esc(e.error)}`).join('<br>')}</div>` : ''}<div class="acts"><button onclick="copyImp()">Копировать список (ФИО, телефон, код)</button><button class="sec" onclick="mclose()">Закрыть</button></div>`);
+  } catch (e) { perr(e.message); }
+}
+async function copyImp() { toast(await copyText(S.imp.created.map(x => [x.full_name, fmt(x.login), x.password].join('\t')).join('\n')) ? 'Список скопирован' : 'Не удалось скопировать'); }
+async function candCard(id) {
+  mopen('<p>Загрузка…</p>', 1);
+  try { const d = await api('/candidates/' + id); AD.cc = d; candCardView(); } catch (e) { mclose(); toast(e.message); }
+}
+function candCardView() {
+  const d = AD.cc, u = d.user, e = d.enrollment, m = AD.meta, st = u.active ? SB[e.status] : ['no', 'Отключён'];
+  mopen(`<h2>${esc(u.name || 'Без имени')}</h2><p class="mu">${fmt(u.login)} · код доступа ${esc(u.login.slice(-4))} · <span class="tag ${st[0]}">${st[1]}</span><br>Доступ до ${dateRu(e.access_until)} · последний вход ${u.last_login_at ? new Date(u.last_login_at).toLocaleString('ru-RU') : '—'}</p>
+<div class="tw"><table><tr><th>Модуль</th><th>Статус</th><th>Попыток</th><th>Лучший результат</th></tr>${d.blocks.map(b => `<tr><td>${esc(b.title)}</td><td><span class="tag ${b.status === 'passed' ? 'ok' : b.status === 'failed' ? 'no' : ''}">${{ passed: 'Пройден', locked: 'Закрыт', failed: 'Не пройден', open: 'Идёт' }[b.status]}</span></td><td>${b.used} / ${b.max_attempts}</td><td>${b.best == null ? '—' : b.best + '%'}</td></tr>`).join('') || '<tr><td colspan="4" class="mu">Курс ещё не выбран</td></tr>'}</table></div>
+<div class="acts" style="margin:14px 0">${can() ? `<button class="sec sm" onclick="cAct(${u.id},'extend',{days:3})">Продлить на 3 дня</button><button class="sec sm" onclick="cAct(${u.id},'extend',{days:7})">+7 дней</button><button class="sec sm" onclick="cAct(${u.id},'end-session')">Завершить сеанс</button><button class="sec sm" onclick="cAct(${u.id},'reset-password')">Сбросить код</button><button class="sec sm" onclick="cAct(${u.id},'reset-direction')">Сбросить язык</button><button class="sec sm" onclick="cAct(${u.id},'active',{active:${u.active ? 0 : 1}})">${u.active ? 'Отключить' : 'Включить'}</button>` : ''}${can(['admin', 'trainer']) ? `<button class="sec sm" onclick="cAct(${u.id},'reset-attempts')">Сбросить попытки</button>` : ''}<button class="sec sm" onclick="invModal('${esc((u.name || 'коллега').replace(/'/g, ''))}','${u.login}','${e.access_until}')">Приглашение</button></div>
+${can() ? `<h2>Данные</h2>${fld('ce_n', 'ФИО', u.name)}${sel('ce_c', 'Поток', [['', 'Без потока']].concat(m.cohorts.map(c => [c.id, c.title])), e.cohort_id || '')}${sel('ce_l', 'Язык обучения', [['', 'Не выбран'], ['ru', 'Русский'], ['uz', 'Узбекский']], e.lang || '')}${fld('ce_d', 'Доступ до', dform(e.access_until), 'date')}${fld('ce_t', 'Заметка', e.note || '')}<div class="err" id="pe"></div><div class="acts" style="margin-top:12px"><button onclick="candEdit(${u.id})">Сохранить</button>${S.me.role === 'admin' ? `<button class="sec" onclick="candDel(${u.id})">Удалить кандидата</button>` : ''}<button class="sec" onclick="mclose()">Закрыть</button></div>` : '<div class="acts"><button class="sec" onclick="mclose()">Закрыть</button></div>'}`, 1);
+}
+async function cAct(id, a, body) {
+  try { const r = await api('/candidates/' + id + '/' + a, { method: 'POST', body: body || {} }); toast(a === 'reset-password' ? 'Код сброшен: ' + r.password : 'Готово'); AD.cands = await api('/candidates'); AD.cc = await api('/candidates/' + id); candCardView(); } catch (e) { toast(e.message); }
+}
+async function candEdit(id) {
+  try { const e = AD.cc.enrollment, b = { full_name: val('ce_n'), cohort_id: val('ce_c') || null, note: val('ce_t'), access_until: val('ce_d') }; if (val('ce_l') && val('ce_l') !== (e.lang || '')) b.lang = val('ce_l'); await api('/candidates/' + id, { method: 'PUT', body: b }); toast('Сохранено'); AD.cands = await api('/candidates'); AD.cc = await api('/candidates/' + id); candCardView(); } catch (x) { perr(x.message); }
+}
+function candDel(id) { mopen(`<h2>Удалить кандидата?</h2><p>Данные и результаты будут стёрты безвозвратно. Если нужно закрыть доступ, лучше «Отключить».</p><div class="acts"><button onclick="candDelOk(${id})">Удалить навсегда</button><button class="sec" onclick="mclose()">Отмена</button></div>`); }
+async function candDelOk(id) { try { await api('/candidates/' + id, { method: 'DELETE' }); S.m = ''; AD.cands = await api('/candidates'); render(); toast('Удалено'); } catch (e) { toast(e.message); } }
+// ===== Потоки =====
 function aCohorts() {
-  const c = S.ad.cohorts || [];
-  return `<div class="card"><h1>Потоки</h1><p class="mu">Поток — группа кандидатов с одной датой старта и сроком доступа. Участники потока видят рейтинг друг друга (без имён).</p>${can() ? '<button onclick="cohForm()">+ Новый поток</button>' : ''}<div class="tw" style="margin-top:14px"><table><tr><th>Поток</th><th>Старт</th><th>Доступ до</th><th>Кандидатов</th></tr>${c.map(x => `<tr><td><b>${esc(x.title)}</b></td><td>${dateRu(x.mass_date)}</td><td>${dateRu(x.deadline)}</td><td>${x.students}</td></tr>`).join('')}</table></div></div>`;
+  const c = AD.cohorts;
+  return `<div class="card"><h1>Потоки</h1><p class="mu">Поток — группа кандидатов с одной датой старта и сроком доступа. Участники потока видят рейтинг друг друга (без имён).</p>${can() ? '<button onclick="cohForm(0)">+ Новый поток</button>' : ''}<div class="tw" style="margin-top:14px"><table><tr><th>Поток</th><th>Направление</th><th>Старт</th><th>Доступ до</th><th>Кандидатов</th><th></th></tr>${c.map(x => `<tr><td><b>${esc(x.title)}</b></td><td>${esc(x.direction || '—')}</td><td>${dateRu(x.mass_date)}</td><td>${dateRu(x.deadline)}</td><td>${x.students}</td><td><div class="acts">${can() ? `<button class="sec sm" onclick="cohForm(${x.id})">Изменить</button><button class="sec sm" onclick="cohAssign(${x.id})">Состав</button><button class="sec sm" onclick="cohDel(${x.id})">Удалить</button>` : ''}</div></td></tr>`).join('') || '<tr><td colspan="6" class="mu">Потоков пока нет</td></tr>'}</table></div></div>`;
 }
-function cohForm() { const m = S.ad.meta; S.m = `<h2>Новый поток</h2>${fld('hn', 'Название', 'Поток с ')}${fld('hd', 'Дата старта', '', 'date')}${sel('hr', 'Направление', m.directions.map(d => [d.id, d.name]), m.directions[0] && m.directions[0].id)}${fld('hy', 'Срок доступа, дней', 14, 'number')}<div class="err" id="pe"></div><div class="acts" style="margin-top:14px"><button onclick="cohSave()">Создать</button><button class="sec" onclick="S.m='';render()">Отмена</button></div>`; render(); }
-async function cohSave() { try { await api('/cohorts', { method: 'POST', body: { title: val('hn'), mass_date: val('hd'), direction_id: val('hr'), days: +val('hy') } }); S.m = ''; S.ad.meta = await api('/meta'); await loadAd('a_cohorts'); render(); } catch (e) { $('#pe').textContent = e.message; } }
-function aCourses() { const c = S.ad.courses || []; return `<div class="card"><h1>Курсы</h1><p class="mu">Курс создаётся для направления и языка. Редактор курсов, уроков и вопросов появится на следующем этапе.</p><div class="tw"><table><tr><th>Курс</th><th>Язык</th><th>Направление</th><th>Модулей</th><th>Уроков</th><th>Вопросов</th><th>Статус</th></tr>${c.map(x => `<tr><td><b>${esc(x.title)}</b></td><td>${x.lang.toUpperCase()}</td><td>${esc(x.direction)}</td><td>${x.blocks}</td><td>${x.lessons}</td><td>${x.questions}</td><td><span class="tag ${x.published ? 'ok' : ''}">${x.published ? 'Опубликован' : 'Черновик'}</span></td></tr>`).join('')}</table></div></div>`; }
+function cohForm(id) {
+  const m = AD.meta, x = AD.cohorts.find(y => y.id === id) || { title: 'Поток с ', mass_date: '', direction_id: m.directions[0] && m.directions[0].id }, days = x.deadline && x.mass_date ? Math.round((Date.parse(x.deadline) - Date.parse(x.mass_date)) / 864e5) : 14;
+  mopen(`<h2>${id ? 'Изменить поток' : 'Новый поток'}</h2>${fld('hn', 'Название', x.title)}${fld('hd', 'Дата старта', dform(x.mass_date), 'date')}${sel('hr', 'Направление', m.directions.map(d => [d.id, d.name]), x.direction_id)}${fld('hy', 'Срок доступа, дней', days, 'number')}${id ? '<label class="opt"><input id="hs" type="checkbox"><span>Обновить срок доступа у всех кандидатов потока</span></label>' : ''}<div class="err" id="pe"></div>${mbtn('cohSave(' + id + ')', 'Сохранить')}`);
+}
+async function cohSave(id) {
+  try { const b = { title: val('hn'), mass_date: val('hd'), direction_id: val('hr'), days: +val('hy'), sync_deadline: chk('hs') }; await api(id ? '/cohorts/' + id : '/cohorts', { method: id ? 'PUT' : 'POST', body: b }); S.m = ''; await adRefresh(); toast('Сохранено'); } catch (e) { perr(e.message); }
+}
+function cohDel(id) { const x = AD.cohorts.find(y => y.id === id); mopen(`<h2>Удалить поток?</h2><p>Поток «${esc(x.title)}» будет удалён. Кандидаты (${x.students}) останутся в системе, но без потока и без рейтинга.</p><div class="acts"><button onclick="cohDelOk(${id})">Удалить</button><button class="sec" onclick="mclose()">Отмена</button></div>`); }
+async function cohDelOk(id) { try { await api('/cohorts/' + id, { method: 'DELETE' }); S.m = ''; await adRefresh(); toast('Удалено'); } catch (e) { toast(e.message); } }
+async function cohAssign(id) {
+  mopen('<p>Загрузка…</p>', 1);
+  try {
+    AD.cands = await api('/candidates'); const x = AD.cohorts.find(y => y.id === id);
+    mopen(`<h2>Состав потока «${esc(x.title)}»</h2><p class="mu">Отметьте кандидатов, которых нужно добавить в поток. Убрать кандидата из потока можно в его карточке.</p><div style="max-height:360px;overflow:auto">${AD.cands.map(r => `<label class="opt"><input type="checkbox" name="as" value="${r.id}" ${r.cohort_id === id ? 'checked disabled' : ''}><span><b>${esc(r.full_name || '—')}</b> · ${fmt(r.phone)}${r.cohort_id && r.cohort_id !== id ? ' <span class="mu">(сейчас: ' + esc(r.cohort) + ')</span>' : ''}</span></label>`).join('')}</div><label class="opt"><input id="as_s" type="checkbox" checked><span>Установить им срок доступа потока</span></label>${mbtn('cohAssignGo(' + id + ')', 'Добавить отмеченных')}`, 1);
+  } catch (e) { mclose(); toast(e.message); }
+}
+async function cohAssignGo(id) { try { const ids = [...document.querySelectorAll('input[name="as"]:checked:not(:disabled)')].map(x => +x.value); if (!ids.length) return toast('Никто не отмечен'); await api('/cohorts/' + id + '/assign', { method: 'POST', body: { user_ids: ids, sync_deadline: chk('as_s') } }); S.m = ''; await adRefresh(); toast('Добавлено: ' + ids.length); } catch (e) { toast(e.message); } }
+// ===== Курсы =====
+function aCourses() {
+  const c = AD.courses;
+  return `<div class="card"><h1>Курсы</h1><p class="mu">Курс создаётся для направления и языка. Чтобы сделать перевод, дублируйте курс на другой язык.</p><button onclick="courseForm(0)">+ Новый курс</button><div class="tw" style="margin-top:14px"><table><tr><th>Курс</th><th>Язык</th><th>Направление</th><th>Модулей</th><th>Уроков</th><th>Вопросов</th><th>Кандидатов</th><th>Статус</th><th></th></tr>${c.map(x => `<tr><td><b>${esc(x.title)}</b></td><td>${x.lang.toUpperCase()}</td><td>${esc(x.direction)}</td><td>${x.blocks}</td><td>${x.lessons}</td><td>${x.questions}</td><td>${x.students}</td><td><span class="tag ${x.published ? 'ok' : ''}">${x.published ? 'Опубликован' : 'Черновик'}</span></td><td><div class="acts"><button class="sm" onclick="adGo('a_course',{id:${x.id}})">Редактор</button><button class="sec sm" onclick="coursePub(${x.id},${x.published ? 0 : 1})">${x.published ? 'Снять' : 'Опубликовать'}</button><button class="sec sm" onclick="courseForm(${x.id})">Дублировать</button><button class="sec sm" onclick="courseDel(${x.id})">Удалить</button></div></td></tr>`).join('')}</table></div></div>`;
+}
+function courseForm(copy) {
+  const m = AD.meta, src = AD.courses.find(x => x.id === copy);
+  mopen(`<h2>${copy ? 'Дублировать курс' : 'Новый курс'}</h2>${fld('cf_t', 'Название', src ? src.title + ' (копия)' : '')}${sel('cf_d', 'Направление', m.directions.map(d => [d.id, d.name]), src ? src.direction_id : m.directions[0] && m.directions[0].id)}${sel('cf_l', 'Язык', [['ru', 'Русский'], ['uz', 'Узбекский']], src ? (src.lang === 'ru' ? 'uz' : 'ru') : 'ru')}${copy ? '<p class="mu">Будут скопированы модули, уроки и вопросы. Если выбран другой язык, копия станет переводом исходного курса.</p>' : ''}<div class="err" id="pe"></div>${mbtn('courseSave(' + copy + ')', copy ? 'Дублировать' : 'Создать')}`);
+}
+async function courseSave(copy) { try { const r = await api('/courses', { method: 'POST', body: { title: val('cf_t'), direction_id: val('cf_d'), lang: val('cf_l'), copy_from: copy || null } }); S.m = ''; AD.meta = null; await adGo('a_course', { id: r.id }); toast('Курс создан'); } catch (e) { perr(e.message); } }
+async function coursePub(id, v) { try { await api('/courses/' + id, { method: 'PUT', body: { published: v } }); await adRefresh(); toast(v ? 'Опубликован' : 'Снят с публикации'); } catch (e) { toast(e.message); } }
+function courseDel(id) { const x = AD.courses.find(y => y.id === id); mopen(`<h2>Удалить курс?</h2><p>«${esc(x.title)}» со всеми модулями, уроками и вопросами будет удалён безвозвратно.${x.students ? ' У курса есть кандидаты (' + x.students + '), удаление будет отклонено. Снимите курс с публикации вместо удаления.' : ''}</p><div class="acts"><button onclick="courseDelOk(${id})">Удалить</button><button class="sec" onclick="mclose()">Отмена</button></div>`); }
+async function courseDelOk(id) { try { await api('/courses/' + id, { method: 'DELETE' }); S.m = ''; await adRefresh(); toast('Удалено'); } catch (e) { S.m = ''; render(); toast(e.message); } }
+function aCourse() {
+  const d = AD.course; if (!d) return '';
+  const c = d.course;
+  return `<p><button class="lnk" onclick="adGo('a_courses')">← К списку курсов</button></p><div class="card"><h1>${esc(c.title)} <span class="tag">${c.lang.toUpperCase()}</span> <span class="tag ${c.published ? 'ok' : ''}">${c.published ? 'Опубликован' : 'Черновик'}</span></h1>
+${fld('ct_t', 'Название', c.title)}${ta('ct_d', 'Описание', c.description, 70)}<div class="grid" style="margin-top:6px"><div>${fld('ct_n', 'Нужно набрать, % от всех баллов', c.need_percent, 'number')}</div><div>${fld('ct_y', 'Срок курса, дней', Math.round(c.duration_sec / 86400), 'number')}</div></div>${ta('ct_s', 'Сообщение при успехе', c.success_message, 60)}${ta('ct_f', 'Сообщение при неудаче', c.fail_message, 60)}<label class="opt"><input id="ct_p" type="checkbox" ${c.published ? 'checked' : ''}><span>Опубликован (доступен кандидатам)</span></label><div class="err" id="pe"></div><p style="margin-top:12px"><button onclick="courseUpd(${c.id})">Сохранить настройки курса</button></p></div>
+${d.blocks.map((b, i) => blockCard(b, i, d.blocks.length)).join('')}<p><button onclick="blockForm(0,${c.id})">+ Добавить модуль</button></p>`;
+}
+function blockCard(b, i, n) {
+  return `<div class="card"><div class="row" style="padding-top:0"><div class="t"><h2 style="margin:0">${i + 1}. ${esc(b.title)} ${b.label === 'final' ? '<span class="tag">Итоговый</span>' : ''}</h2><span class="mu">День открытия: ${b.day} · в тесте ${b.questions_count} из ${b.questions.length} вопросов · проходной ${b.pass_percent}% · попыток ${b.max_attempts}${b.time_limit_min ? ' · ' + b.time_limit_min + ' мин' : ''}</span></div><div class="acts"><button class="sec sm" ${i ? '' : 'disabled'} onclick="mv('blocks',${b.id},-1)">↑</button><button class="sec sm" ${i < n - 1 ? '' : 'disabled'} onclick="mv('blocks',${b.id},1)">↓</button><button class="sec sm" onclick="blockForm(${b.id},0)">Параметры</button><button class="sec sm" onclick="blockDel(${b.id})">Удалить</button></div></div>
+<h3 style="margin:10px 0 4px;font-size:15px">Уроки</h3>${b.lessons.map((l, k) => `<div class="row" style="padding:8px 0"><div class="t"><b>${esc(l.title)}</b><span class="mu">блоков: ${l.content.length}</span></div><div class="acts"><button class="sec sm" ${k ? '' : 'disabled'} onclick="mv('lessons',${l.id},-1)">↑</button><button class="sec sm" ${k < b.lessons.length - 1 ? '' : 'disabled'} onclick="mv('lessons',${l.id},1)">↓</button><button class="sm" onclick="lessonForm(${l.id},${b.id})">Изменить</button><button class="sec sm" onclick="lessonDel(${l.id})">Удалить</button></div></div>`).join('') || '<p class="mu">Уроков нет</p>'}<p><button class="sec sm" onclick="lessonForm(0,${b.id})">+ Урок</button></p>
+<h3 style="margin:10px 0 4px;font-size:15px">Вопросы (${b.questions.length})</h3>${b.questions.map((q, k) => `<div class="ans"><b>${k + 1}. ${esc(q.text)}</b> ${q.type === 'multi' ? '<span class="tag">несколько ответов</span>' : ''}${q.options.map(o => `<div class="${o.correct ? '' : 'mu'}">${o.correct ? '✓ ' : '· '}${esc(o.text)}</div>`).join('')}<div class="acts" style="margin-top:6px"><button class="sec sm" onclick="qForm(${q.id},${b.id})">Изменить</button><button class="sec sm" onclick="qDel(${q.id})">Удалить</button></div></div>`).join('') || '<p class="mu">Вопросов нет</p>'}<div class="acts"><button class="sec sm" onclick="qForm(0,${b.id})">+ Вопрос</button><button class="sec sm" onclick="qImport(${b.id})">Импорт текстом</button></div></div>`;
+}
+async function courseUpd(id) { try { await api('/courses/' + id, { method: 'PUT', body: { title: val('ct_t'), description: val('ct_d'), need_percent: val('ct_n'), duration_days: val('ct_y'), success_message: val('ct_s'), fail_message: val('ct_f'), published: chk('ct_p') } }); toast('Сохранено'); AD.meta = null; await adGo('a_course', { id }); } catch (e) { perr(e.message); } }
+async function mv(kind, id, dir) { try { await api('/' + kind + '/' + id + '/move', { method: 'POST', body: { dir } }); AD.course = await api('/courses/' + S.p.id); render(); } catch (e) { toast(e.message); } }
+const reloadCourse = async () => { S.m = ''; AD.course = await api('/courses/' + S.p.id); render(); };
+function blockForm(id, courseId) {
+  const b = id ? AD.course.blocks.find(x => x.id === id) : { title: '', day: 1, questions_count: 3, pass_percent: 60, max_attempts: 2, time_limit_min: 0, label: '' };
+  mopen(`<h2>${id ? 'Параметры модуля' : 'Новый модуль'}</h2>${fld('bk_t', 'Название', b.title)}<div class="grid"><div>${fld('bk_d', 'День открытия (с начала курса)', b.day, 'number')}</div><div>${fld('bk_q', 'Вопросов в тесте', b.questions_count, 'number')}</div><div>${fld('bk_p', 'Проходной, %', b.pass_percent, 'number')}</div><div>${fld('bk_a', 'Попыток', b.max_attempts, 'number')}</div><div>${fld('bk_m', 'Время теста, минут (0 — без ограничения)', b.time_limit_min, 'number')}</div></div><label class="opt"><input id="bk_f" type="checkbox" ${b.label === 'final' ? 'checked' : ''}><span>Итоговый тест (ставить последним модулем)</span></label><div class="err" id="pe"></div>${mbtn('blockSave(' + id + ',' + courseId + ')', 'Сохранить')}`);
+}
+async function blockSave(id, courseId) { try { const b = { title: val('bk_t'), day: val('bk_d'), questions_count: val('bk_q'), pass_percent: val('bk_p'), max_attempts: val('bk_a'), time_limit_min: val('bk_m'), label: chk('bk_f') ? 'final' : '' }; await api(id ? '/blocks/' + id : '/courses/' + courseId + '/blocks', { method: id ? 'PUT' : 'POST', body: b }); await reloadCourse(); toast('Сохранено'); } catch (e) { perr(e.message); } }
+function blockDel(id) { mopen(`<h2>Удалить модуль?</h2><p>Модуль со всеми уроками и вопросами будет удалён. Результаты кандидатов по этому модулю тоже пропадут.</p><div class="acts"><button onclick="delOk('blocks',${id})">Удалить</button><button class="sec" onclick="mclose()">Отмена</button></div>`); }
+const lessonDel = id => mopen(`<h2>Удалить урок?</h2><p>Урок будет удалён безвозвратно.</p><div class="acts"><button onclick="delOk('lessons',${id})">Удалить</button><button class="sec" onclick="mclose()">Отмена</button></div>`);
+const qDel = id => mopen(`<h2>Удалить вопрос?</h2><div class="acts"><button onclick="delOk('questions',${id})">Удалить</button><button class="sec" onclick="mclose()">Отмена</button></div>`);
+async function delOk(kind, id) { try { await api('/' + kind + '/' + id, { method: 'DELETE' }); await reloadCourse(); toast('Удалено'); } catch (e) { toast(e.message); } }
+// --- редактор урока ---
+const BT = { heading: 'Заголовок', text: 'Текст', callout: 'Выноска', accordion: 'Раскрывающийся блок', image: 'Картинка (ссылка)', video: 'Видео (ссылка на файл)', file: 'Файл (ссылка)', divider: 'Разделитель' };
+let DR = { l: [], q: null };
+function lessonForm(id, blockId) {
+  const b = AD.course.blocks.find(x => x.id === blockId || (id && x.lessons.some(l => l.id === id))), l = id ? b.lessons.find(x => x.id === id) : { title: '', content: [{ type: 'text', text: '' }] };
+  DR.l = JSON.parse(JSON.stringify(l.content));
+  mopen(`<h2>${id ? 'Изменить урок' : 'Новый урок'}</h2>${fld('ls_t', 'Название урока', l.title)}<h3 style="font-size:15px;margin:14px 0 4px">Содержание урока</h3><div id="lb"></div><div class="acts" style="margin-top:10px"><select id="lb_t" style="width:auto">${Object.entries(BT).map(([k, t]) => `<option value="${k}">${t}</option>`).join('')}</select><button class="sec sm" onclick="DR.l.push({type:val('lb_t'),text:'',title:'',url:'',caption:''});lbDraw()">+ Добавить блок</button></div><div class="err" id="pe"></div>${mbtn('lessonSave(' + id + ',' + b.id + ')', 'Сохранить урок')}`, 1);
+  lbDraw();
+}
+function lbDraw() {
+  const e = $('#lb'); if (!e) return;
+  const inp = (k, f, ph, rows) => rows ? `<textarea style="min-height:${rows}px" placeholder="${ph}" oninput="DR.l[${k}].${f}=this.value">${esc(DR.l[k][f] || '')}</textarea>` : `<input type="text" placeholder="${ph}" value="${esc(DR.l[k][f] || '')}" oninput="DR.l[${k}].${f}=this.value">`;
+  e.innerHTML = DR.l.map((b, k) => `<div class="ans"><div class="acts" style="justify-content:space-between"><b>${BT[b.type]}</b><span class="acts"><button class="sec sm" ${k ? '' : 'disabled'} onclick="lbMv(${k},-1)">↑</button><button class="sec sm" ${k < DR.l.length - 1 ? '' : 'disabled'} onclick="lbMv(${k},1)">↓</button><button class="sec sm" onclick="DR.l.splice(${k},1);lbDraw()">✕</button></span></div>${{ heading: () => inp(k, 'text', 'Текст заголовка'), text: () => inp(k, 'text', 'Текст', 110), callout: () => inp(k, 'text', 'Текст выноски', 70), accordion: () => inp(k, 'title', 'Заголовок блока') + inp(k, 'text', 'Скрытый текст', 80), image: () => inp(k, 'url', 'https://… ссылка на картинку') + inp(k, 'caption', 'Подпись'), video: () => inp(k, 'url', 'https://… ссылка на видеофайл (mp4)'), file: () => inp(k, 'url', 'https://… ссылка на файл') + inp(k, 'title', 'Название ссылки'), divider: () => '<hr>' }[b.type]()}</div>`).join('') || '<p class="mu">Блоков нет. Добавьте первый блок.</p>';
+}
+const lbMv = (k, d) => { [DR.l[k], DR.l[k + d]] = [DR.l[k + d], DR.l[k]]; lbDraw(); };
+async function lessonSave(id, blockId) { try { const b = { title: val('ls_t'), content: DR.l }; if (!b.title) return perr('Введите название урока'); if (id) await api('/lessons/' + id, { method: 'PUT', body: b }); else await api('/blocks/' + blockId + '/lessons', { method: 'POST', body: b }); await reloadCourse(); toast('Сохранено'); } catch (e) { perr(e.message); } }
+// --- редактор вопроса ---
+function qForm(id, blockId) {
+  const b = AD.course.blocks.find(x => x.id === blockId || x.questions.some(q => q.id === id)), q = id ? b.questions.find(x => x.id === id) : { text: '', type: 'single', options: [{ text: '', correct: true }, { text: '', correct: false }, { text: '', correct: false }] };
+  DR.q = JSON.parse(JSON.stringify(q));
+  mopen(`<h2>${id ? 'Изменить вопрос' : 'Новый вопрос'}</h2>${ta('qq_t', 'Вопрос', q.text, 70)}${sel('qq_y', 'Тип', [['single', 'Один правильный ответ'], ['multi', 'Несколько правильных ответов']], q.type)}<h3 style="font-size:15px;margin:14px 0 4px">Варианты ответа (отметьте правильные)</h3><div id="qo"></div><p><button class="sec sm" onclick="DR.q.options.push({text:'',correct:false});qoDraw()">+ Вариант</button></p><div class="err" id="pe"></div>${mbtn('qSave(' + id + ',' + b.id + ')', 'Сохранить вопрос')}`, 1);
+  $('#qq_y').onchange = e => { DR.q.type = e.target.value; if (DR.q.type === 'single') { const f = DR.q.options.findIndex(o => o.correct); DR.q.options.forEach((o, i) => { o.correct = i === (f < 0 ? 0 : f); }); } qoDraw(); };
+  qoDraw();
+}
+function qoDraw() {
+  const e = $('#qo'); if (!e) return; const multi = DR.q.type === 'multi';
+  e.innerHTML = DR.q.options.map((o, k) => `<div class="acts" style="margin-bottom:6px;flex-wrap:nowrap"><input type="${multi ? 'checkbox' : 'radio'}" name="qc" ${o.correct ? 'checked' : ''} onchange="qoCorrect(${k},this.checked)" aria-label="Правильный ответ" style="flex:none"><input type="text" style="flex:1" placeholder="Вариант ответа" value="${esc(o.text)}" oninput="DR.q.options[${k}].text=this.value"><button class="sec sm" onclick="DR.q.options.splice(${k},1);qoDraw()">✕</button></div>`).join('');
+}
+function qoCorrect(k, on) { if (DR.q.type === 'multi') DR.q.options[k].correct = on; else DR.q.options.forEach((o, i) => { o.correct = i === k; }); }
+async function qSave(id, blockId) { try { DR.q.text = val('qq_t'); DR.q.type = val('qq_y'); if (id) await api('/questions/' + id, { method: 'PUT', body: DR.q }); else await api('/blocks/' + blockId + '/questions', { method: 'POST', body: DR.q }); await reloadCourse(); toast('Сохранено'); } catch (e) { perr(e.message); } }
+function qImport(blockId) {
+  mopen(`<h2>Импорт вопросов текстом</h2><p class="mu">Вопросы разделяются пустой строкой. Первая строка — вопрос, дальше варианты: «+» в начале правильного, «-» неправильного. Если «+» несколько, вопрос получит несколько ответов.</p>${ta('qi_t', 'Текст', 'Что такое просрочка?\n+ Нарушение срока платежа\n- Закрытие договора\n- Смена тарифа\n\nСледующий вопрос?\n+ ответ\n- ответ', 220)}<label class="opt"><input id="qi_r" type="checkbox"><span>Заменить существующие вопросы модуля</span></label><div class="err" id="pe"></div>${mbtn('qImportGo(' + blockId + ')', 'Импортировать')}`, 1);
+}
+async function qImportGo(blockId) { try { const r = await api('/blocks/' + blockId + '/questions/import', { method: 'POST', body: { text: val('qi_t'), replace: chk('qi_r') } }); if (r.errors.length) return perr(r.errors.map(e => 'Вопрос ' + e.n + ' («' + e.text + '»): ' + e.error).join('. ')); await reloadCourse(); toast('Добавлено вопросов: ' + r.added); } catch (e) { perr(e.message); } }
+// ===== Направления =====
+function aDirs() {
+  return `<div class="card"><h1>Направления</h1><p class="mu">Направление — это профиль обучения (например, Soft Collection). У каждого направления свои курсы.</p><button onclick="dirForm(0)">+ Новое направление</button><div class="tw" style="margin-top:14px"><table><tr><th>Название</th><th>Срок доступа по умолчанию</th><th>Кандидатов</th><th>Статус</th><th></th></tr>${AD.dirs.map(d => `<tr><td><b>${esc(d.name)}</b></td><td>${d.deadline_days} дн.</td><td>${d.students}</td><td><span class="tag ${d.active ? 'ok' : ''}">${d.active ? 'Активно' : 'Отключено'}</span></td><td><div class="acts"><button class="sec sm" onclick="dirForm(${d.id})">Изменить</button><button class="sec sm" onclick="dirDel(${d.id})">Удалить</button></div></td></tr>`).join('')}</table></div></div>`;
+}
+function dirForm(id) { const d = AD.dirs.find(x => x.id === id) || { name: '', deadline_days: 14, active: 1 }; mopen(`<h2>${id ? 'Изменить направление' : 'Новое направление'}</h2>${fld('dn', 'Название', d.name)}${fld('dd', 'Срок доступа по умолчанию, дней', d.deadline_days, 'number')}${id ? `<label class="opt"><input id="da" type="checkbox" ${d.active ? 'checked' : ''}><span>Активно</span></label>` : ''}<div class="err" id="pe"></div>${mbtn('dirSave(' + id + ')', 'Сохранить')}`); }
+async function dirSave(id) { try { const b = { name: val('dn'), deadline_days: val('dd'), active: id ? (chk('da') ? 1 : 0) : 1 }; await api(id ? '/directions/' + id : '/directions', { method: id ? 'PUT' : 'POST', body: b }); S.m = ''; await adRefresh(); toast('Сохранено'); } catch (e) { perr(e.message); } }
+function dirDel(id) { mopen(`<h2>Удалить направление?</h2><p>Вместе с направлением удалятся его курсы. Если в нём есть кандидаты, удаление будет отклонено.</p><div class="acts"><button onclick="dirDelOk(${id})">Удалить</button><button class="sec" onclick="mclose()">Отмена</button></div>`); }
+async function dirDelOk(id) { try { await api('/directions/' + id, { method: 'DELETE' }); S.m = ''; await adRefresh(); toast('Удалено'); } catch (e) { S.m = ''; render(); toast(e.message); } }
+// ===== Сотрудники =====
+function aStaff() {
+  return `<div class="card"><h1>Сотрудники</h1><p class="mu">Администратор — всё. Тренер — курсы, уроки, вопросы и сброс попыток. Рекрутер — кандидаты, потоки и приглашения.</p><button onclick="staffForm(0)">+ Добавить сотрудника</button><div class="tw" style="margin-top:14px"><table><tr><th>Сотрудник</th><th>Роль</th><th>Статус</th><th>Последний вход</th><th></th></tr>${AD.staff.map(u => `<tr><td><b>${esc(u.full_name || '—')}</b><br><span class="mu">${esc(u.login)}</span></td><td>${ROLE[u.role]}</td><td><span class="tag ${u.active ? 'ok' : 'no'}">${u.active ? 'Активен' : 'Отключён'}</span></td><td>${u.last_login_at ? new Date(u.last_login_at).toLocaleString('ru-RU') : '—'}</td><td><div class="acts"><button class="sec sm" onclick="staffForm(${u.id})">Изменить</button>${u.login === S.me.login ? '' : `<button class="sec sm" onclick="staffDel(${u.id})">Удалить</button>`}</div></td></tr>`).join('')}</table></div></div>`;
+}
+function staffForm(id) { const u = AD.staff.find(x => x.id === id) || { login: '', full_name: '', role: 'recruiter', active: 1 }; mopen(`<h2>${id ? 'Изменить сотрудника' : 'Новый сотрудник'}</h2>${id ? `<p class="mu">${esc(u.login)}</p>` : fld('sf_l', 'Рабочая почта (логин)', '', 'email')}${fld('sf_n', 'ФИО', u.full_name)}${sel('sf_r', 'Роль', [['admin', 'Администратор'], ['trainer', 'Тренер'], ['recruiter', 'Рекрутер']], u.role)}${fld('sf_p', id ? 'Новый пароль (оставьте пустым, чтобы не менять)' : 'Пароль (не короче 8 символов)', '', 'password')}${id ? `<label class="opt"><input id="sf_a" type="checkbox" ${u.active ? 'checked' : ''}><span>Активен</span></label>` : ''}<div class="err" id="pe"></div>${mbtn('staffSave(' + id + ')', 'Сохранить')}`); }
+async function staffSave(id) { try { const b = { full_name: val('sf_n'), role: val('sf_r'), password: $('#sf_p').value, active: id ? (chk('sf_a') ? 1 : 0) : 1 }; if (!id) b.login = val('sf_l'); if (id && !b.password) delete b.password; await api(id ? '/staff/' + id : '/staff', { method: id ? 'PUT' : 'POST', body: b }); S.m = ''; await adRefresh(); toast('Сохранено'); } catch (e) { perr(e.message); } }
+function staffDel(id) { mopen(`<h2>Удалить сотрудника?</h2><div class="acts"><button onclick="staffDelOk(${id})">Удалить</button><button class="sec" onclick="mclose()">Отмена</button></div>`); }
+async function staffDelOk(id) { try { await api('/staff/' + id, { method: 'DELETE' }); S.m = ''; await adRefresh(); toast('Удалено'); } catch (e) { toast(e.message); } }
+// ===== Настройки и журнал =====
+function aSet() {
+  return `<div class="card"><h1>Настройки</h1><h2>Текст приглашения кандидату</h2><p class="mu">Подстановки: {name} — имя, {link} — ссылка на сайт, {phone} — номер, {code} — код доступа, {deadline} — срок.</p>${ta('st_ru', 'Русский', AD.set.invite_ru, 150)}${ta('st_uz', 'Узбекский', AD.set.invite_uz, 150)}<div class="err" id="pe"></div><p style="margin-top:12px"><button onclick="setSave()">Сохранить</button></p></div>`;
+}
+async function setSave() { try { await api('/settings', { method: 'PUT', body: { invite_ru: $('#st_ru').value, invite_uz: $('#st_uz').value } }); AD.meta = null; toast('Сохранено'); } catch (e) { perr(e.message); } }
+const ACT = { candidate_update: 'Изменён кандидат', candidates_import: 'Импорт кандидатов', cohort_create: 'Создан поток', cohort_update: 'Изменён поток', cohort_delete: 'Удалён поток', cohort_assign: 'Состав потока', direction_create: 'Создано направление', direction_update: 'Изменено направление', direction_delete: 'Удалено направление', course_create: 'Создан курс', course_update: 'Изменён курс', course_delete: 'Удалён курс', block_delete: 'Удалён модуль', questions_import: 'Импорт вопросов', staff_create: 'Добавлен сотрудник', staff_update: 'Изменён сотрудник', staff_delete: 'Удалён сотрудник', settings_update: 'Изменены настройки' };
+function aAudit() { return `<div class="card"><h1>Журнал действий</h1><div class="tw"><table><tr><th>Когда</th><th>Кто</th><th>Действие</th><th>Подробности</th></tr>${AD.audit.map(a => `<tr><td>${new Date(a.at).toLocaleString('ru-RU')}</td><td>${esc(a.login || '—')}</td><td>${ACT[a.action] || esc(a.action)}</td><td>${esc(a.detail)}</td></tr>`).join('') || '<tr><td colspan="4" class="mu">Записей пока нет</td></tr>'}</table></div></div>`; }
 
 // ---------- отрисовка ----------
 function trans() { const w = document.createTreeWalker($('#app'), NodeFilter.SHOW_TEXT); let n; while (n = w.nextNode()) { if (n.nodeValue.trim()) n.nodeValue = tr(n.nodeValue); } document.querySelectorAll('#app [placeholder]').forEach(e => { e.placeholder = tr(e.placeholder); }); }
